@@ -1,0 +1,481 @@
+---
+title: 'STA 141 Project '
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+---
+
+## Influence of risk factors and socioeconomic status on heart attack death rate at county level in the US
+
+```{r, message = FALSE}
+library(ggplot2)
+library(lmtest)
+library(tidyverse)
+library(sandwich)
+library(MASS)
+library(usmap) 
+library(scales)
+```
+
+```{r}
+# read csv file with the cdc data
+cdc <-  read.csv('cdc-report.csv')
+
+# changing the variables names for better readability
+names(cdc) <- c('cnty_fips','display_name','HeartAttack_rate','theme_range','obesity','diabetes','smoker', 
+'no_college','no_internet','income', 'poverty')
+
+#checking number of rows and columns
+c(nrow(cdc),ncol(cdc))
+head(cdc)
+```
+
+```{r}
+# checking columns types
+sapply(cdc, class)
+```
+
+```{r}
+# example of '-1' values meaning insufficient information
+tail(cdc)
+```
+
+```{r}
+# showing that those '-1' values are not NA
+colSums(is.na(cdc))
+```
+
+```{r}
+# replacing '-1' values for NA
+cdc[cdc == -1] <- NA
+colSums(is.na(cdc))
+```
+
+```{r}
+#Removing missing values
+nrow(cdc)
+cdc <- na.omit(cdc)
+nrow(cdc)
+
+#Removing 0 values from the outcome heart attack death rate
+cdc <- cdc[cdc$HeartAttack_rate != 0,]
+
+nrow(cdc)
+ncol(cdc)
+```
+
+```{r}
+# mean an median of the outcome heart attack death rate
+c(mean(cdc$HeartAttack_rate),median(cdc$HeartAttack_rate))
+
+vars = c('HeartAttack_rate','obesity','diabetes','smoker', 
+'no_college','no_internet','income', 'poverty')
+
+mean_table = as.data.frame(apply(cdc[,vars], MARGIN=2, FUN=mean))
+colnames(mean_table) = c("Mean Values")
+mean_table
+```
+
+```{r}
+# Creating a histogram for the outcome
+p = ggplot(data=cdc, aes(x=HeartAttack_rate)) + 
+  geom_histogram(bins=100, fill="#D3D3D3", color='#353535') +
+  geom_vline(aes(xintercept = mean(cdc$HeartAttack_rate), color='mean'), linetype="dashed") +
+  geom_vline(aes(xintercept = median(cdc$HeartAttack_rate), color='median'), linetype="dashed") +
+  scale_color_manual(name="statistics", values =c(median = "blue", mean = "red"))+
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank()) 
+
+# Add titles
+p <- p + labs(title = "Histogram of Hearth Attack death rate",
+              caption = "Data source: CDC")
+
+p
+```
+
+
+```{r, fig.height=6, fig.width=12}
+# function 1: create histograms for the selected variables in a dataframe
+
+histo_maker = function(df, var_vector, dim_vector){
+  # df: the dataframe used
+  # var_vector: the vector of variables column index that we want to make a histogram for
+  # dim_vector: dimension of the output graphs
+  
+  par(mfrow=dim_vector)
+  
+  for (col in colnames(df[, var_vector])) {
+    hist(cdc[,col], main=col, xlab=col)
+  }
+}
+
+dim = c(4,2)
+index = c(5,6,7,8,9,10,11)
+histo_maker(cdc,index, dim)
+
+# track the distribution of values in each variables
+
+```
+
+
+```{r}
+# selecting variables for the analysis
+vars = c('HeartAttack_rate','obesity','diabetes','smoker', 
+'no_college','no_internet','income', 'poverty')
+
+panel.cor <- function(x, y) {
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y, use = "complete.obs"), 2)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * abs(r))
+}
+# plotting paired plot with correlation
+pairs(~HeartAttack_rate + obesity + diabetes + smoker + no_college +no_internet + income + poverty, data = cdc[,vars], lower.panel = panel.cor)
+
+```
+
+```{r}
+# correlation matrix
+mcor = round(cor(cdc[,vars]),2)
+upper = mcor
+upper[upper.tri(mcor)] = ""
+upper = as.data.frame(upper)
+
+upper
+```
+
+```{r}
+# dividing the dataset into training and test set
+set.seed(10)
+n <- nrow(cdc)/4
+ind <- sample(1:(2*n), n, replace=FALSE)
+
+cdc_train <- cdc[-ind, vars] 
+cdc_test <- cdc[ind, vars] 
+
+nrow(cdc_train)
+nrow(cdc_test)
+
+```
+
+```{r, fig.height=6, fig.width=12}
+# variables distribution in the training and test set
+vars = c('HeartAttack_rate','obesity','diabetes','smoker', 
+'no_college','no_internet','income', 'poverty')
+par(mfrow=c(3,3))
+for(col in vars){
+  boxplot(cdc_train[,col],cdc_test[,col],
+          col=rainbow(2),ylab=col,main=col,
+          names=c("train", "test"))
+}
+```
+
+```{r}
+# Fitting the first order model with all the variables
+fit.1 <- lm(HeartAttack_rate ~ obesity + diabetes + smoker
+ + no_college + no_internet + income + poverty, data=cdc_train)
+
+summary(fit.1)
+```
+
+```{r}
+# residuals plots for fit.1
+par(mfrow=c(2,2))
+plot(fit.1)
+```
+
+
+```{r, fig.height=12, fig.width=12}
+# function 2: create scatterplots of interaction terms and residuals from fit.1
+
+inter_scatter = function(df, dim_vector, model){
+  # df: the dataframe we are using, assuming that the responds variable is the first column
+  # dim_vector: dimension of the output graphs
+  # model: the model we created, where we are getting the residuals from
+  
+  par(mfrow = dim_vector)
+  
+  for (i in 2:(length(names(df))-1)){
+    for (j in (i+1):length(names(df))){
+      label = paste(names(df)[i],names(df)[j], sep="*")
+      plot(df[,i]*df[,j], model$residuals, xlab = label)
+    }
+  }
+}
+
+
+dim2 = c(7,3)
+inter_scatter(cdc_train, dim2, fit.1)
+```
+
+
+```{r}
+# BoxCox procedure
+bc = boxcox(fit.1)
+lambda = bc$x[which.max(bc$y)]
+lambda
+```
+
+```{r}
+# Creating a histogram for the log transformation of the response variable
+p <- ggplot(data=cdc, aes(x=log(HeartAttack_rate))) + 
+  geom_histogram(bins=100, fill="#D3D3D3", color='#353535', alpha=0.5) +
+  geom_vline(aes(xintercept = mean(log(cdc$HeartAttack_rate)), color='mean'), linetype="dashed") +
+  geom_vline(aes(xintercept = median(log(cdc$HeartAttack_rate)), color='median'), linetype="dashed") +
+  scale_color_manual(name="statistics", values =c(median = "blue", mean = "red"))+
+  theme_bw() +
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank()) 
+
+# Add titles
+p <- p + labs(title = "Histogram of log(Hearth Attack death rate)",
+              caption = "Data source: CDC")
+
+p
+
+```
+
+```{r}
+# step AIC procedure on traning data
+full_model <- lm(log(HeartAttack_rate) ~ obesity + diabetes + smoker
+ + no_college + no_internet + income + poverty, data=cdc_train)
+
+null_model <- lm(log(HeartAttack_rate)~ 1, data = cdc_train)
+
+fit.2 <- stepAIC(null_model, scope = list(upper = full_model, lower = ~1), direction = "both", k = 2, trace = F)
+```
+
+```{r}
+summary(fit.2)
+```
+
+```{r}
+# Nonconstant error variance test
+bptest(fit.2)
+```
+
+```{r}
+# standard errors after correction
+fit.2 %>% 
+    vcovHC() %>% 
+    diag() %>% 
+    sqrt()
+```
+
+```{r}
+# new standard errors and pvalues
+coeftest(fit.2, vcov = vcovHC(fit.2))
+```
+
+```{r}
+# fit the final model with 4 variables
+fit.final <- lm(log(HeartAttack_rate) ~ no_college + poverty + smoker + income, data = cdc_train)
+
+s<- summary(fit.final)
+s
+```
+
+```{r}
+#fit the model with the validation set
+valid <-lm(fit.final, cdc_test)
+sv <- summary(valid)
+sv
+```
+
+```{r}
+anova(fit.final)
+```
+
+
+```{r}
+# Data only from california
+cdc_ca <- filter(cdc, grepl("(CA)", display_name, ignore.case = FALSE))
+
+nrow(cdc_ca)
+head(cdc_ca)
+```
+
+
+```{r}
+# finding the optimal model for the counties in california
+full_model.ca = 
+  lm(log(HeartAttack_rate) ~ 
+    obesity + diabetes + smoker + no_college + no_internet + income + poverty, 
+    data=cdc_ca)
+
+null_model.ca <- lm(log(HeartAttack_rate)~ 1, data = cdc_ca)
+
+fit.ca <- stepAIC(null_model.ca, scope = list(upper = full_model.ca, lower = ~1), direction = "both", k = 2, trace = F)
+```
+
+```{r}
+summary(fit.ca)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(fit.ca)
+```
+
+```{r}
+# Creating column State and aggregating states by the mean
+cdc <- cdc %>%
+  extract(display_name, c('State'), regex = "([(]\\w+[)])", remove = FALSE) 
+
+cdc$State <- gsub("[(]","",as.character(cdc$State))
+cdc$State <- gsub("[)]","",as.character(cdc$State))
+
+ha_by_state <- aggregate(cdc[,c(4,6:12)], list(cdc$State), mean)
+
+names(ha_by_state) <- c('state', 'HeartAttackRate', 'obesity', 'diabetes','smoker','no_college','no_internet','income', 'poverty')
+
+head(ha_by_state)
+```
+
+```{r}
+# plotting usmap colored by heart attack death rate
+plot_usmap(data = ha_by_state, values = "HeartAttackRate", labels = T) + 
+  scale_fill_continuous(low = "white", high = "red", name = "HeartAttackRate") + 
+  theme(legend.position = "right")
+```
+
+```{r}
+# A little interaction game
+
+# rank the dataframe by the heart attack death rate
+state_ordered = ha_by_state[order(ha_by_state$HeartAttackRate),]
+
+# average death rate in your state
+
+checkratebystate = function(state_abrv){
+  if (state_abrv %in% state_ordered$state){
+    rank_number = which(state_ordered$state == state_abrv)
+    percentage = percent((51 - rank_number)/51, accuracy = 1)
+    
+    str = "In terms of low heart attack rate, your state ranks number"
+    str2 = "out of all 50 states and the District of Columbia. It is better than"
+    str3 = "of the states."
+    
+    print(paste(str,rank_number,str2,percentage,str3,sep = " "))
+    
+  } else {
+    print("That's not an abbreviation of state. Make sure you only input 2 capital letters as strings.")
+  }
+ 
+}
+
+# examples:
+checkratebystate("CA")
+checkratebystate("AR")
+checkratebystate("wa")
+```
+
+
+```{r}
+# plotting US map colored by current smoker prevalence
+plot_usmap(data = ha_by_state, values = "smoker", labels = T) + 
+  scale_fill_continuous(
+    low = "white", high = "red", name = "Smoker", label = scales::comma
+  ) + theme(legend.position = "right")
+```
+
+
+```{r}
+# clustering analysis - elbow method
+set.seed(10)
+cluster_vars = c('smoker','no_college','income', 'poverty')
+k.max <- 15
+data <- scale(ha_by_state[,cluster_vars])
+wss <- sapply(1:k.max, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 50)$tot.withinss})
+plot(1:k.max, wss,
+     type="b", pch = 18, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+```
+
+```{r}
+# Evaluation number of states on each cluster
+km2 <- kmeans(ha_by_state[,cluster_vars],2,nstart=50,iter.max = 50)
+km3 <- kmeans(ha_by_state[,cluster_vars],3,nstart=50,iter.max = 50)
+
+
+table(km2$cluster)
+table(km3$cluster)
+```
+
+```{r}
+# plotting the US map clustered
+set.seed(10)
+k = 2
+km.out <- kmeans(ha_by_state[,cluster_vars],k,nstart=30)
+
+k_colors = c('1' = "#F1A286", '2' = "#B396F8",'3' = "#75FA4C", '4' = "#F9DAAC")
+ha_by_state['cluster'] <- factor(km.out$cluster)
+plot_usmap(data = ha_by_state, values = "cluster", labels = T) + 
+  scale_fill_manual(values = k_colors[1:k], name = "cluster") + theme(legend.position = "right", legend.text=element_text(size=12))
+
+
+```
+
+```{r}
+# Cluster centroids, heart attack rate added after the clustering process
+aggregate(ha_by_state[,c('HeartAttackRate',cluster_vars)], list(ha_by_state$cluster), mean)
+```
+
+
+
+```{r}
+# bootstraping mean of cluster 1
+set.seed(10)
+n=nrow(ha_by_state[ha_by_state$cluster==1,])
+c=ncol(ha_by_state[,c('HeartAttackRate',cluster_vars)])
+B=1000
+mean.c1=matrix(0, B,c)
+for (b in 1:B){
+  index=sample(n, replace = TRUE)
+  mean.c1[b, ]= apply(ha_by_state[ha_by_state$cluster==1,c('HeartAttackRate',cluster_vars)][index,], MARGIN=2, FUN=mean)
+}
+```
+
+```{r}
+# bootstraping mean of cluster 2
+set.seed(10)
+n=nrow(ha_by_state[ha_by_state$cluster==2,])
+c=ncol(ha_by_state[,c('HeartAttackRate',cluster_vars)])
+B=1000
+mean.c2=matrix(0, B,c)
+for (b in 1:B){
+  index=sample(n, replace = TRUE)
+  mean.c2[b, ]= apply(ha_by_state[ha_by_state$cluster==2,c('HeartAttackRate',cluster_vars)][index,], MARGIN=2, FUN=mean)
+}
+```
+
+
+```{r}
+# generating confidence interval
+mean_confint <- function(x){
+  return(paste(round(mean(x),2), " [", round(quantile(x, 0.025),2),',',round(quantile(x, 0.975),2),']', sep=''))
+}
+table.c <- aggregate(ha_by_state[,c('HeartAttackRate',cluster_vars)], list(ha_by_state$cluster), mean)
+
+table.c <- as.data.frame(as.matrix(t(table.c[,-1])))
+names(table.c) <- c('Cluster 1', 'Cluster 2')
+
+table.c$'Cluster 1'<- apply(mean.c1, MARGIN=2, FUN=mean_confint)
+table.c$'Cluster 2' <- apply(mean.c2, MARGIN=2, FUN=mean_confint)
+
+table.c
+
+```
